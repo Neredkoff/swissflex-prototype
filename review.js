@@ -222,11 +222,12 @@
         return '<div class="sfx-item"' + (c.done ? ' style="opacity:.55"' : '') + '><div class="meta">Комментарий ' + c.n + ', ' + esc(c.author || 'Без имени') + ', ' + fmtDate(c.t) + (c.done ? ', решено' : '') + '</div><div>' + esc(c.text) + '</div>' + (c.quote ? '<div class="meta">К блоку: «' + esc(c.quote) + '»</div>' : '') + '<div class="acts">' + (k !== file ? '<a href="' + k + '">Открыть страницу</a>' : '<button type="button" data-show="' + c.id + '">Показать</button>') + '<button type="button" data-done="' + c.id + '">' + (c.done ? 'Вернуть в работу' : 'Решено') + '</button></div></div>';
       }).join('');
     }).join('') : '<div class="empty">Правок и комментариев пока нет. Включите «Правка текста» или «Комментарий» в нижней панели.</div>';
-    panel.innerHTML = '<header><span>Правки и комментарии</span><button type="button" data-p="close">Закрыть</button></header><div class="list">' + html + '</div><footer><button type="button" class="pri" data-p="copy">Скопировать текстом</button><button type="button" data-p="download">Скачать файл</button><label>Загрузить файл<input type="file" accept=".json,application/json" hidden data-p="import"></label><button type="button" data-p="clear">Очистить всё</button></footer>';
+    panel.innerHTML = '<header><span>Правки и комментарии</span><button type="button" data-p="close">Закрыть</button></header><div class="list">' + html + '</div><footer><button type="button" class="pri" data-p="link" style="grid-column:1/-1">Скопировать ссылку с правками</button><button type="button" data-p="copy">Скопировать текстом</button><button type="button" data-p="download">Скачать файл</button><label>Загрузить файл<input type="file" accept=".json,application/json" hidden data-p="import"></label><button type="button" data-p="clear">Очистить всё</button></footer>';
     panel.querySelector('[data-p=close]').onclick = togglePanel;
     panel.querySelectorAll('[data-rev]').forEach(function (b) { b.onclick = function () { revertEdit(b.getAttribute('data-rev')); }; });
     panel.querySelectorAll('[data-done]').forEach(function (b) { b.onclick = function () { var c = data.comments.find(function (x) { return x.id === b.getAttribute('data-done'); }); c.done = !c.done; save(); renderPins(); refresh(); }; });
     panel.querySelectorAll('[data-show]').forEach(function (b) { b.onclick = function () { var c = data.comments.find(function (x) { return x.id === b.getAttribute('data-show'); }); var p = anchorPos(c); scrollTo({ top: p.y - 200, behavior: 'smooth' }); setTimeout(function () { openComment(c); }, 350); }; });
+    panel.querySelector('[data-p=link]').onclick = copyLink;
     panel.querySelector('[data-p=copy]').onclick = copyText;
     panel.querySelector('[data-p=download]').onclick = download;
     panel.querySelector('[data-p=import]').onchange = importFile;
@@ -262,19 +263,43 @@
     var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'swissflex-pravki-' + new Date().toISOString().slice(0, 10) + '.json';
     document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500); toast('Файл правок скачан');
   }
+  function mergeData(d) {
+    var added = 0;
+    (d.edits || []).forEach(function (x) { var cur = data.edits.find(function (e) { return e.page === x.page && e.sel === x.sel; }); if (!cur) { data.edits.push(x); added++; } else if ((x.t || 0) > (cur.t || 0)) { Object.assign(cur, x); added++; } });
+    (d.comments || []).forEach(function (x) { if (!data.comments.some(function (c) { return c.id === x.id; })) {
+      var n = data.comments.filter(function (c) { return c.page === x.page; }).reduce(function (m, c) { return Math.max(m, c.n); }, 0) + 1;
+      if (data.comments.some(function (c) { return c.page === x.page && c.n === x.n; })) x.n = n;
+      data.comments.push(x); added++; } });
+    save(); applyEdits(); renderPins(); refresh(); return added;
+  }
+  function b64u(bytes) { var s = ''; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  function unb64u(str) { str = str.replace(/-/g, '+').replace(/_/g, '/'); while (str.length % 4) str += '='; var s = atob(str), a = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; }
+  async function pack(obj) { var bytes = new TextEncoder().encode(JSON.stringify(obj)); if (window.CompressionStream) { bytes = new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer()); return 'z' + b64u(bytes); } return 'j' + b64u(bytes); }
+  async function unpack(str) { var bytes = unb64u(str.slice(1)); if (str[0] === 'z') bytes = new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer()); return JSON.parse(new TextDecoder().decode(bytes)); }
+  async function copyLink() {
+    if (!data.edits.length && !data.comments.length) { toast('Пока нечего отправлять'); return; }
+    var code = await pack({ app: 'sfx-review', v: 1, edits: data.edits, comments: data.comments });
+    var url = location.origin + location.pathname + '#sfx=' + code;
+    var ok = function () { toast('Ссылка с правками скопирована'); };
+    (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(ok, function () {
+      var ta = document.createElement('textarea'); ta.value = url; ta.setAttribute('data-sfx-ui', ''); document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); ok(); } catch (e) { toast('Не удалось скопировать'); } ta.remove();
+    });
+    window.SFX_LAST_LINK = url;
+  }
+  async function readLink() {
+    var m = location.hash.match(/^#sfx=(.+)$/); if (!m) return;
+    try { var d = await unpack(m[1]); if (d.app !== 'sfx-review') throw 0; var n = mergeData(d); toast(n ? 'Загружены правки из ссылки: ' + n : 'Эти правки у вас уже есть'); }
+    catch (e) { toast('Ссылка с правками повреждена'); }
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+  }
   function importFile(e) {
     var f = e.target.files[0]; if (!f) return;
     var rd = new FileReader();
     rd.onload = function () {
       try {
         var d = JSON.parse(rd.result); if (d.app !== 'sfx-review') throw 0;
-        var added = 0;
-        (d.edits || []).forEach(function (x) { var cur = data.edits.find(function (e) { return e.page === x.page && e.sel === x.sel; }); if (!cur) { data.edits.push(x); added++; } else if ((x.t || 0) > (cur.t || 0)) { Object.assign(cur, x); added++; } });
-        (d.comments || []).forEach(function (x) { if (!data.comments.some(function (c) { return c.id === x.id; })) {
-          var n = data.comments.filter(function (c) { return c.page === x.page; }).reduce(function (m, c) { return Math.max(m, c.n); }, 0) + 1;
-          if (data.comments.some(function (c) { return c.page === x.page && c.n === x.n; })) x.n = n;
-          data.comments.push(x); added++; } });
-        save(); applyEdits(); renderPins(); refresh(); toast('Загружено: ' + added);
+        toast('Загружено: ' + mergeData(d));
       } catch (err) { toast('Это не файл правок прототипа'); }
     };
     rd.readAsText(f);
@@ -282,7 +307,8 @@
   var tt = null;
   function toast(m) { var t = document.querySelector('.sfx-toast'); if (!t) { t = document.createElement('div'); t.className = 'sfx-toast'; t.setAttribute('data-sfx-ui', ''); document.body.appendChild(t); } t.textContent = m; clearTimeout(tt); tt = setTimeout(function () { t.remove(); }, 2200); }
 
-  applyEdits(); renderPins(); refresh();
+  applyEdits(); renderPins(); refresh(); readLink();
+  addEventListener('hashchange', readLink);
   addEventListener('load', renderPins);
   addEventListener('storage', function (e) { if (e.key === KEY) { data = load(); renderPins(); refresh(); } });
 })();
